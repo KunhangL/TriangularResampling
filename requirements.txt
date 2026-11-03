@@ -1,0 +1,40 @@
+# Python 3.11 + PyTorch 2.9.1 (CUDA 12.8) is the tested combination for both lines.
+torch==2.9.1
+lightning>=2.6
+pytorch-lightning>=2.6
+torch_ema
+transformers
+tokenizers
+sentencepiece
+protobuf
+diffusers
+torchmetrics
+omegaconf
+PyYAML
+numpy
+scipy
+einops
+ftfy
+regex
+tqdm
+huggingface_hub>=0.34
+
+# data, rendering and evaluation
+smplx
+trimesh
+pyrender
+PyOpenGL
+matplotlib
+Pillow
+imageio[ffmpeg]
+imageio-ffmpeg
+moviepy
+opencv-python
+
+# logging
+tensorboard
+wandb
+
+# optional: flash-attn (FD1 attention falls back to PyTorch SDPA without it),
+# pytorch3d (one optional mesh-rendering helper in methods/fd1/utils/render_mesh.py),
+# scikit-learn (one optional metric helper in methods/fd2/training/native/metrics/tools/utils.py).

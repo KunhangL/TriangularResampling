@@ -1,0 +1,184 @@
+exp_name: humanml_babel
+seed: 1234
+debug: false
+train: true
+pre_fit_validate: false
+
+save_dir: ./outputs
+resume_ckpt: null
+init_ckpt: ${dirs.outputs}/20251107_021814_ldf_stream/step_step=240000.ckpt
+init_ckpt_format: flooddiffusion_official
+test_ckpt: null
+test_vae_ckpt: ${dirs.outputs}/vae_1d_z4_step=300000.ckpt
+test_vae:
+  target: methods.fd1.models.vae_wan_1d.VAEWanModel
+  ema_decay: 0.99
+  params:
+    input_dim: 263
+    z_dim: 4
+
+test_setting:
+  render: true
+  simple: true
+  recover_dim: 263
+  HumanML3D:
+    compare_motion_folders:
+      - ${dirs.raw_data}/HumanML3D/new_joint_vecs
+    compare_names: [Ground Truth]
+  BABEL:
+    compare_motion_folders:
+      - ${dirs.raw_data}/BABEL/new_joint_vecs
+    compare_names: [Ground Truth]
+
+val_repeat: 1
+logger:
+  wandb:
+    wandb_key: ${wandb_info.key}
+    project: ${wandb_info.project}
+    entity: ${wandb_info.entity}
+
+trainer:
+  max_steps: 30000
+  accelerator: gpu
+  devices: 1
+  log_every_n_steps: 100
+  precision: bf16-mixed
+  num_sanity_val_steps: 0
+
+validation:
+  validation_steps: 5000
+  test_steps: 5000
+  save_every_n_steps: 5000
+  save_top_k: 100
+
+metrics:
+  dim: 263
+  t2m:
+    evaluate_text: true
+    fid_target: original
+    metric_mean_path: ${dirs.deps}/t2m/meta/mean.npy
+    metric_std_path: ${dirs.deps}/t2m/meta/std.npy
+    wordvectorizer:
+      target: common.metrics.tools.word_vectorizer.WordVectorizer
+      params:
+        meta_root: ${dirs.deps}/glove
+        prefix: our_vab
+      max_text_len: 20
+    textencoder:
+      target: common.metrics.tools.t2m_evaluator.TextEncoderBiGRUCo
+      ckpt: ${dirs.deps}/t2m/humanml3d/text_encoder.pt
+      params:
+        word_size: 300
+        pos_size: 15
+        hidden_size: 512
+        output_size: 512
+    moveencoder:
+      target: common.metrics.tools.t2m_evaluator.MovementConvEncoder
+      ckpt: ${dirs.deps}/t2m/humanml3d/movement_encoder.pt
+      params:
+        input_size: 259
+        hidden_size: 512
+        output_size: 512
+    motionencoder:
+      target: common.metrics.tools.t2m_evaluator.MotionEncoderBiGRUCo
+      ckpt: ${dirs.deps}/t2m/humanml3d/motion_encoder.pt
+      params:
+        input_size: 512
+        hidden_size: 1024
+        output_size: 512
+
+data:
+  target: methods.fd1.datasets.multi.MultiDataset
+  collate_fn: methods.fd1.datasets.multi.collate_fn
+  train_bs: 4
+  val_bs: 4
+  test_bs: 4
+  num_workers: 8
+  datasets:
+    - target: methods.fd1.datasets.humanml3d.HumanML3DDataset
+      stream_mode: true
+      train_meta_paths:
+        - ${dirs.raw_data}/HumanML3D/train.txt
+      val_meta_paths:
+        - ${dirs.raw_data}/HumanML3D/test.txt
+      test_meta_paths:
+        - ${dirs.raw_data}/HumanML3D/test_min.txt
+      feature_path: new_joint_vecs
+      token_path: TOKENS_20251030_085836_vae_wan_z4
+      text_path: texts
+      random_length: 0
+      min_length: 40
+      val_min_length: 0
+      val_max_length: 99999
+      max_length: 200
+    - target: methods.fd1.datasets.babel.BabelDataset
+      train_meta_paths:
+        - ${dirs.raw_data}/BABEL/train.txt
+      val_meta_paths: []
+      test_meta_paths:
+        - ${dirs.raw_data}/BABEL/test_min.txt
+      feature_path: new_joint_vecs
+      token_path: TOKENS_20251030_085836_vae_wan_z4
+      text_path: texts
+      random_length: 0
+      min_length: 5
+      max_length: 99999
+      window_length: 200
+      feature_fps: 20
+      token_fps: 5
+
+model:
+  target: methods.fd1.models.diffusion_forcing_wan.DiffForcingWanModel
+  ema_decay: 0.99
+  params:
+    schedule_config:
+      noise_type: linear
+      chunk_size: 5
+      steps: 10
+      extra_len: 4
+      sigma_type: zero
+      sigma_scale: 1.0
+      random_epsilon: 0.0
+      content_len: 105
+    text_config:
+      len: 512
+      dim: 4096
+      checkpoint_path: ${dirs.deps}/t5_umt5-xxl-enc-bf16/models_t5_umt5-xxl-enc-bf16.pth
+      tokenizer_path: ${dirs.deps}/t5_umt5-xxl-enc-bf16/google/umt5-xxl
+      extend_last_context: true
+    input_dim: 4
+    input_keys:
+      feature: token
+      feature_length: token_length
+      text: text
+      text_end: token_text_end
+    cfg_config:
+      text_scale: 5.0
+      null_scale: -4.0
+    prediction_type: vel
+    loss_reduction: sum
+    time_conditioning: noise
+    time_embedding_scale: 1.0
+    context_pad_to_text_len: true
+    causal: false
+    rope_channel_split: null
+    resampling_ratio: 1.0
+    warmup_steps: 0
+    resample_len: 100
+    resample_shift: 0.6
+    resample_clamp_mode: frontier
+    history_augmentation: none
+    resample_source: [model]
+
+optimizer:
+  target: AdamW
+  params:
+    lr: 0.0002
+    betas: [0.9, 0.99]
+    weight_decay: 0.0
+    eps: 1.0e-08
+
+lr_scheduler:
+  target: diffusers.optimization.get_constant_schedule_with_warmup
+  params:
+    num_warmup_steps: 0

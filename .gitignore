@@ -1,0 +1,44 @@
+# Machine-specific path overrides and credentials
+methods/*/configs/paths.yaml
+.env
+.env.*
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+*.egg-info/
+.venv*/
+venv/
+.vscode/
+.idea/
+.DS_Store
+
+# External assets, datasets and weights (download separately)
+/deps/
+/raw_data/
+/checkpoints/
+/outputs/
+/fd2_assets/
+/data/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.npy
+*.npz
+*.pkl
+
+# Generated media, logs and experiment records
+*.mp4
+*.gif
+*.log
+wandb/
+lightning_logs/
+logs/
+runs/

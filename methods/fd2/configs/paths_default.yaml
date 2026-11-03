@@ -1,0 +1,7 @@
+# Asset locations used by the FD2 rendering utilities (SMPL-H body model under
+# <deps>/smplh). Copy to methods/fd2/configs/paths.yaml (ignored by Git) to
+# override. Relative paths are resolved from the repository root.
+dirs:
+    deps: deps
+    outputs: outputs
+    raw_data: raw_data

@@ -1,0 +1,13 @@
+# Machine-specific locations for the FD1 line. Copy this file to
+# methods/fd1/configs/paths.yaml (ignored by Git) to override it.
+# Relative paths are resolved from the directory you run the commands in
+# (the repository root).
+dirs:
+    deps: deps              # UMT5 encoder, HumanML3D T2M evaluator, GloVe, SMPL-H
+    outputs: outputs        # checkpoints and run directories
+    raw_data: raw_data      # HumanML3D/, BABEL/
+
+wandb_info:
+    key: "${oc.env:WANDB_API_KEY,}"   # empty = no Weights & Biases login
+    project: "TriangularResampling"
+    entity: ""
