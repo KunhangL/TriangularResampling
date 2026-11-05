@@ -1,0 +1,163 @@
+# FloodDiffusion 2 + Self-Generated Prefix + DMD (TR + DMD), HumanML3D + BABEL, native 263D features at 20 fps.
+# Post-training from the official FD2 `humanml3d_babel_fk_200k` release:
+# global batch 4, lr 2e-5, 5-step DMD critic, detached self-rollout prefix (disable_threshold_cut=True).
+dirs:
+  deps: deps                    # UMT5 encoder, HumanML3D T2M evaluator, GloVe (shared with FD1)
+  raw_data: raw_data            # HumanML3D/ and BABEL/ 263D features + texts (shared with FD1)
+  checkpoints: checkpoints      # official FD2 release (methods/fd2/upstream/FloodDiffusion2/setup_project.py)
+  outputs: outputs
+exp_name: fd2_humanml_babel_tr_dmd
+seed: 1234
+debug: false
+train: true
+save_dir: ${dirs.outputs}/fd2_humanml_babel_tr_dmd
+resume_ckpt: null
+test_ckpt: ${dirs.checkpoints}/humanml3d_babel_fk_200k/model.ckpt
+representation: humanml3d263
+test_setting:
+  render: true
+  HumanML3D:
+    compare_folders:
+    - ${dirs.raw_data}/HumanML3D/HumanML3D263/renders
+    compare_names:
+    - Ground Truth
+val_repeat: 1
+logger:
+  wandb:
+    wandb_key: ${oc.env:WANDB_API_KEY,}
+    project: TriangularResampling
+    entity: ''
+trainer:
+  max_steps: 30000
+  accelerator: gpu
+  devices:
+  - 0
+  log_every_n_steps: 50
+  precision: bf16-mixed
+  num_nodes: 1
+validation:
+  validation_steps: 5000
+  test_steps: 5000
+  save_every_n_steps: 50
+  save_top_k: 100
+metrics:
+  t2m:
+    target: methods.fd2.training.native.metrics.HumanML3D263.t2m.T2MMetrics
+    fid_target: original
+    params:
+      evaluate_text: true
+      metric_mean_path: ${dirs.deps}/t2m/meta/mean.npy
+      metric_std_path: ${dirs.deps}/t2m/meta/std.npy
+      wordvectorizer:
+        target: methods.fd2.training.native.metrics.HumanML3D263.word_vectorizer.WordVectorizer
+        params:
+          meta_root: ${dirs.deps}/glove
+          prefix: our_vab
+        max_text_len: 20
+      textencoder:
+        target: methods.fd2.training.native.metrics.HumanML3D263.t2m_evaluator.TextEncoderBiGRUCo
+        ckpt: ${dirs.deps}/t2m/humanml3d/text_encoder.pt
+        params:
+          word_size: 300
+          pos_size: 15
+          hidden_size: 512
+          output_size: 512
+      moveencoder:
+        target: methods.fd2.training.native.metrics.HumanML3D263.t2m_evaluator.MovementConvEncoder
+        ckpt: ${dirs.deps}/t2m/humanml3d/movement_encoder.pt
+        params:
+          input_size: 259
+          hidden_size: 512
+          output_size: 512
+      motionencoder:
+        target: methods.fd2.training.native.metrics.HumanML3D263.t2m_evaluator.MotionEncoderBiGRUCo
+        ckpt: ${dirs.deps}/t2m/humanml3d/motion_encoder.pt
+        params:
+          input_size: 512
+          hidden_size: 1024
+          output_size: 512
+data:
+  target: methods.fd2.training.data.FrozenMotionDataset
+  collate_fn: methods.fd2.training.data.collate_fn
+  membership_manifest: ${dirs.raw_data}/manifests/humanml_babel.json
+  membership_sha256: 9025125d1b5b0893b7b66f034199fbeae83cea37bdf8f7ff94886a9620e8c216
+  window_length: 200
+  feature_fps: 20
+  train_bs: 4
+  val_bs: 16
+  test_bs: 16
+  num_workers: 4
+model:
+  target: methods.fd2.models.triangular_resampling.TriangularResamplingFD2
+  ema_decay: 0.995
+  params:
+    schedule_config:
+      noise_type: linear
+      chunk_size: 30
+      steps: 30
+      sigma_type: zero
+      sigma_scale: 1.0
+      random_epsilon: 0.0
+      train_n_windows: 8
+    text_config:
+      len: 512
+      dim: 4096
+      checkpoint_path: ${dirs.deps}/t5_umt5-xxl-enc-bf16/models_t5_umt5-xxl-enc-bf16.pth
+      tokenizer_path: ${dirs.deps}/t5_umt5-xxl-enc-bf16/google/umt5-xxl
+      cache_encoded: false
+    input_dim: 263
+    mean_path: ${dirs.checkpoints}/humanml3d_babel_fk_200k/assets/Mean.npy
+    std_path: ${dirs.checkpoints}/humanml3d_babel_fk_200k/assets/Std.npy
+    input_keys:
+      feature: feature
+      feature_length: feature_length
+      text: text
+      text_end: feature_text_end
+    cfg_config:
+      text_scale: 4.0
+      null_scale: -3.0
+    prediction_type: vel
+    attn_type: partial
+    loss_W: ${dirs.checkpoints}/humanml3d_babel_fk_200k/assets/W.npy
+    loss_w_coefficient: 1.0
+    tr_config:
+      ratio: 1.0
+      shift: 0.6
+      target_mode: pure_dmd
+      disable_threshold_cut: true
+      dmd_weight: 1.0
+      dmd_cfg_scale: 1.0
+      dmd_lr: 2.0e-05
+      dmd_warmup_steps: 20
+      dmd_critic_steps: 5
+      dmd_critic_mb: 4
+      dmd_microbatch_size: 0
+      dmd_min_alpha: 0.02
+      dmd_max_alpha: 0.98
+      seed: 1234
+      clamp_mode: frontier
+    execution_config:
+      text_microbatch_size: 4
+fk_matrix:
+  recipe: hml263_trace
+optimizer:
+  target: AdamW
+  params:
+    lr: 2.0e-05
+    betas:
+    - 0.0
+    - 0.999
+    weight_decay: 0.0
+    eps: 1.0e-08
+lr_scheduler:
+  target: CosineAnnealingLR
+  params:
+    T_max: 30000
+    eta_min: 1.0e-06
+init_checkpoint: ${dirs.checkpoints}/humanml3d_babel_fk_200k/model.ckpt
+resources:
+  memory_fraction: 0.94
+wandb_info:
+  key: ${oc.env:WANDB_API_KEY,}
+  project: TriangularResampling
+  entity: ''

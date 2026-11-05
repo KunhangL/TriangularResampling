@@ -570,15 +570,19 @@ class T5EncoderModel:
                 f"Unknown t5_size: {t5_size}. Available: {list(_T5_MODEL_FACTORY.keys())}"
             )
         model_fn = _T5_MODEL_FACTORY[t5_size]
+        init_device = "meta" if checkpoint_path is not None else device
         model = (
             model_fn(
-                encoder_only=True, return_tokenizer=False, dtype=dtype, device=device
+                encoder_only=True, return_tokenizer=False, dtype=dtype, device=init_device
             )
             .eval()
             .requires_grad_(False)
         )
         logging.info(f"loading {checkpoint_path}")
-        model.load_state_dict(torch.load(checkpoint_path, map_location="cpu"))
+        if checkpoint_path is not None:
+            state_dict = torch.load(checkpoint_path, map_location="cpu", mmap=True)
+            model.load_state_dict(state_dict, assign=True)
+            model = model.to(dtype=dtype, device=device)
         self.model = model
         if shard_fn is not None:
             self.model = shard_fn(self.model, sync_module_states=False)

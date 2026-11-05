@@ -47,7 +47,8 @@ class PackedReplayForward:
         # visibility; text_k_rope_ids / text_q_rope_ids carry per-segment rope
         # info when cross_rope=True (None otherwise).
         context, ctx_meta = self.text_module.get_context(
-            x, valid_len, device, self.param_dtype, training=True,
+            x, valid_len, device, self.param_dtype,
+            training=(getattr(self, "target_mode", "default") != "pure_dmd"),
         )
         cross_attn_mask_full = ctx_meta["cross_attn_mask"]
         text_k_rope_ids_full = ctx_meta.get("text_k_rope_ids")
@@ -207,6 +208,7 @@ class PackedReplayForward:
 
         # Expand frame-level time / cross_attn_mask to patch-level
         # (no-ops when spatial_size == 1).
+        all_t_raw = list(all_t)
         all_t = self._expand_schedule_to_patch(all_t)
         all_cross_attn_mask = self._expand_mask_to_patch(all_cross_attn_mask)
         # seq_len = max(pad_seq_len, max_packed). In n=1 mode
@@ -277,6 +279,15 @@ class PackedReplayForward:
             y=None,
             rope_ids=all_rope,
         )
+
+        if getattr(self, "target_mode", "default") == "pure_dmd":
+            loss_dmd, loss_fake = self.compute_dmd_loss_and_step_critic(
+                all_xt, all_t_raw, context, seq_len_for_model, final_attn_mask,
+                text_k_rope_ids, text_q_rope_ids, all_cross_attn_mask, text_seq_len,
+                all_rope, all_clean_lens, predicted_result,
+            )
+            total_loss = self.dmd_weight * loss_dmd
+            return {"total": total_loss, "mse": loss_dmd.new_zeros(()), "dmd": loss_dmd, "critic": loss_fake}
 
         # Per-sample mean -> batch mean. Within each sample sum SE across
         # all W_k tokens and divide by the token count to get per-sample

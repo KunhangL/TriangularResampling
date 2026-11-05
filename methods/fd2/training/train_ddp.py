@@ -74,6 +74,7 @@ def save_checkpoint(trainer,path):
     trainer.save_checkpoint(str(tmp))
     trainer.strategy.barrier()
     if trainer.is_global_zero:os.replace(tmp,destination)
+    elif tmp.exists():tmp.unlink()
     trainer.strategy.barrier()
 
 class DDPModule(FD2TrainingModule):
@@ -179,7 +180,8 @@ def main():
                 generator=torch.Generator().manual_seed(cfg.seed+91000+rank)))
     module=DDPModule(cfg,world)
     if not args.resume:load_initial_weights(module,cfg.init_checkpoint)
-    options=OmegaConf.to_container(cfg.trainer);options.update(devices=world,num_nodes=1)
+    local_world=int(os.environ.get('LOCAL_WORLD_SIZE',world))
+    options=OmegaConf.to_container(cfg.trainer);options.update(devices=local_world,num_nodes=world//local_world)
     trainer=Trainer(**options,strategy=DDPStrategy(find_unused_parameters=True,broadcast_buffers=False),
         use_distributed_sampler=False,logger=False,enable_checkpointing=False,enable_progress_bar=False,
         num_sanity_val_steps=0,default_root_dir=cfg.save_dir,

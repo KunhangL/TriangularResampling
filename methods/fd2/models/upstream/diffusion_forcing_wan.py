@@ -312,20 +312,22 @@ class T5TextCrossModule(nn.Module):
         self.drop_out = drop_out
         self.input_keys = input_keys
 
-        self.text_encoder = T5EncoderModel(
-            text_len=len,
-            dtype=torch.bfloat16,
-            device=torch.device("cpu"),
-            checkpoint_path=checkpoint_path,
-            tokenizer_path=tokenizer_path,
-            shard_fn=None,
-            t5_size=t5_size,
-        )
-        # When False, text_cache is cleared after each encode/get_context call
-        # so it doesn't accumulate across training steps (~190KB per caption,
-        # OOM on 1M+ unique captions).
         self.cache_encoded = bool(cache_encoded)
         self.text_cache = {}
+        pre_cache = os.environ.get("FD2_TEXT_CACHE_PATH", "")
+        if pre_cache and os.path.exists(pre_cache):
+            self.text_encoder = None
+            self.text_cache = torch.load(pre_cache, map_location="cpu", weights_only=False)
+        else:
+            self.text_encoder = T5EncoderModel(
+                text_len=len,
+                dtype=torch.bfloat16,
+                device=torch.device("cpu"),
+                checkpoint_path=checkpoint_path,
+                tokenizer_path=tokenizer_path,
+                shard_fn=None,
+                t5_size=t5_size,
+            )
 
     def encode(self, text_list, device):
         """Encode text list with cache. Returns List[Tensor]."""
@@ -340,7 +342,7 @@ class T5TextCrossModule(nn.Module):
             self.text_encoder.model.to(device)
             encoded = self.text_encoder(texts_to_encode, device)
             for text, feature in zip(texts_to_encode, encoded):
-                self.text_cache[text] = feature.cpu()
+                self.text_cache[text] = feature.to(device) if self.cache_encoded else feature.cpu()
 
         # Collect from cache
         out = [self.text_cache[text].to(device) for text in text_list]
@@ -547,7 +549,7 @@ class T5TextCrossModule(nn.Module):
             self.text_encoder.model.to(device)
             encoded = self.text_encoder(to_encode, device)
             for t, f in zip(to_encode, encoded):
-                self.text_cache[t] = f.cpu()
+                self.text_cache[t] = f.to(device) if self.cache_encoded else f.cpu()
 
         for i in range(len(self.stream_segments)):
             cur_text = text_input[i] if i < len(text_input) else ""
@@ -1587,7 +1589,7 @@ class DiffForcingWanModel(nn.Module):
         )
         while self.current_step < committable_steps:
             s = self.time_scheduler.prepare(
-                self.generated, device, [self.buf_len] * self.batch_size,
+                self.generated[:1], device, [self.buf_len],
                 current_step=self.current_step,
             )
             time_schedules = s["time_schedules"]
@@ -1599,11 +1601,11 @@ class DiffForcingWanModel(nn.Module):
             sigma = s["sigma"]
             dlog_alpha = s["dlog_alpha"]
             dlog_beta = s["dlog_beta"]
-            is_ = s["input_start"]
-            ie_ = s["input_end"]
-            os_ = s["output_start"]
-            oe_ = s["output_end"]
-            xt = s["xt"]
+            is_ = s["input_start"] * self.batch_size
+            ie_ = s["input_end"] * self.batch_size
+            os_ = s["output_start"] * self.batch_size
+            oe_ = s["output_end"] * self.batch_size
+            xt = [g[:, is_[0]:ie_[0], ...] for g in self.generated]
 
             # time_schedules already sliced to input window by prepare()
             time_schedules_input = [
@@ -1657,7 +1659,7 @@ class DiffForcingWanModel(nn.Module):
                 text_q_rope_patch = None
 
             if self.attn_type == "partial":
-                masks = self._build_partial_mask(is_, ie_, os_, oe_, device)
+                masks = self._build_partial_mask(is_[:1], ie_[:1], os_[:1], oe_[:1], device) * self.batch_size
                 attn_mask = masks + masks   # CFG doubled batch (text + null), same mask
             else:
                 attn_mask = None

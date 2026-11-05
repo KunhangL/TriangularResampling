@@ -121,8 +121,32 @@ FD2 (details in [`methods/fd2/README.md`](methods/fd2/README.md)):
 
 ```bash
 python -m methods.fd2.download_assets --with-deps --with-data   # plus HumanML3D from the FD1 command
-bash methods/fd2/scripts/run_train_ddp.sh outputs/fd2_humanml_babel_tr      # 4 GPUs, global batch 128
+# FD2 + TR (official reproduction, global batch 128)
+bash methods/fd2/scripts/run_train_ddp.sh outputs/fd2_humanml_babel_tr
+# FD2 + TR + DMD (self-generated prefix + DMD distribution matching, global batch 4, lr 2e-5)
+torchrun --standalone --nproc_per_node=4 -m methods.fd2.training.train_ddp \
+    --config methods/fd2/configs/humanml_babel_tr_dmd.yaml \
+    --output outputs/fd2_humanml_babel_tr_dmd
 ```
+
+## Released FD2 Checkpoints & Official 120s Benchmark Scores
+
+Pre-trained post-training checkpoints for **FD2 + TR** (`step 200`) and **FD2 + TR + DMD** (`step 400`) are publicly available on Hugging Face at [**`haiyangliu0/TriangularResampling`**](https://huggingface.co/datasets/haiyangliu0/TriangularResampling):
+
+```bash
+# Download both checkpoints into checkpoints/
+huggingface-cli download haiyangliu0/TriangularResampling \
+    checkpoints/fd2_tr_step200.ckpt \
+    checkpoints/fd2_tr_dmd_step400.ckpt \
+    --repo-type dataset --local-dir .
+```
+
+| Model | Step | Fixed First→Last (`0-10s`→`110-120s`) | Fixed ΔFID ↓ | Fixed FID AUC ↓ | Fixed R@3 ↑ | Varying FID AUC ↓ | Varying R@3 ↑ |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **FD2 Pretrain** | `200k` | `1.69 → 5.72` | `+4.03` | `4.33` | `53.7%` | `4.31` | `36.3%` |
+| **FD2 + TR-off** | `200` | `1.60 → 5.43` | `+3.83` | `4.61` | `50.3%` | `5.74` | `35.5%` |
+| **FD2 + TR** | `200` | **`0.75 → 1.43`** | **`+0.68`** | **`1.17`** | **`70.2%`** | **`3.63`** | **`40.7%`** |
+| **FD2 + TR + DMD** | `400` | `1.69 → 3.76` | `+2.06` | `3.18` | `57.1%` | `5.56` | `35.0%` |
 
 ## Long-horizon evaluation
 
