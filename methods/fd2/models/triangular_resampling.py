@@ -1,10 +1,13 @@
 """One canonical replay trajectory, exact branch snapshots, native FD2 packing."""
+import copy
 import math
 
 import torch
+import torch.distributed as dist
 
 from .packed_forward import PackedReplayForward
 from .upstream.diffusion_forcing_wan import DiffForcingWanModel
+from .upstream.quadratic_loss import quadratic_error_sum
 
 
 class TriangularResamplingFD2(PackedReplayForward, DiffForcingWanModel):
@@ -17,6 +20,18 @@ class TriangularResamplingFD2(PackedReplayForward, DiffForcingWanModel):
         self.tr_config = dict(tr_config or {})
         self.resampling_ratio = float(self.tr_config.get('ratio', 0.0))
         self.tr_shift = float(self.tr_config.get('shift', 0.6))
+        self.target_mode = str(self.tr_config.get('target_mode', 'default'))
+        self.disable_threshold_cut = bool(
+            self.tr_config.get('disable_threshold_cut', self.target_mode == 'pure_dmd')
+        )
+        self.dmd_weight = float(self.tr_config.get('dmd_weight', 0.0))
+        self.dmd_cfg_scale = float(self.tr_config.get('dmd_cfg_scale', 1.0))
+        self.dmd_lr = float(self.tr_config.get('dmd_lr', 2.0e-5))
+        self.dmd_warmup_steps = int(self.tr_config.get('dmd_warmup_steps', 20))
+        self.dmd_critic_steps = int(self.tr_config.get('dmd_critic_steps', 5))
+        self.dmd_critic_mb = int(self.tr_config.get('dmd_critic_mb', 4))
+        self.dmd_min_alpha = float(self.tr_config.get('dmd_min_alpha', 0.02))
+        self.dmd_max_alpha = float(self.tr_config.get('dmd_max_alpha', 0.98))
         self.tr_rng = torch.Generator(device='cpu')
         self.tr_rng.manual_seed(int(self.tr_config.get('seed', 1234)))
         self.replay_audit = None
@@ -55,6 +70,8 @@ class TriangularResamplingFD2(PackedReplayForward, DiffForcingWanModel):
 
     def sample_threshold(self):
         eta = torch.randn((), generator=self.tr_rng).item()
+        if self.disable_threshold_cut:
+            return 0.0
         return float(torch.sigmoid(torch.tensor(eta + math.log(self.tr_shift))))
 
     @torch.no_grad()
@@ -80,13 +97,23 @@ class TriangularResamplingFD2(PackedReplayForward, DiffForcingWanModel):
         """Batch canonical grid forwards, then replace native packed inputs/targets."""
         if not self._pending_replays: return
         results=self.replay_batch(self._pending_replays)
+        self._rollout_v_targets={}
         for index,result in results.items():
             request=self._pending_replays[index]
             gt=request['gt']
+            full_clean=result.get('full_clean',result['final'])
             cs,cl=clean_starts[index],clean_lens[index]
-            parts=[result['final'][:,cs:cs+cl]]
+            parts=[full_clean[:,cs:cs+cl].detach() if self.target_mode == 'pure_dmd' else result['final'][:,cs:cs+cl]]
             schedules,_=self.time_scheduler.get_time_schedules(gt.device,[gt.size(1)]*len(windows[index]),request['times'],training=False)
+            v_tgt_parts=[]
             for k,(start,end) in enumerate(windows[index]):
+                if self.target_mode == 'pure_dmd':
+                    x0_w_clean=full_clean[:,start:end].detach()
+                    alpha_k=schedules[k][start:end][None,:,None,None].to(x0_w_clean.dtype)
+                    eps_k=torch.randn_like(x0_w_clean)
+                    parts.append(alpha_k*x0_w_clean+(1.0-alpha_k)*eps_k)
+                    v_tgt_parts.append(x0_w_clean.float()-eps_k.float())
+                    continue
                 state=result['snapshots'][k][:,start:end]
                 parts.append(state)
                 alpha=schedules[k][start:end][None,:,None,None]
@@ -94,6 +121,8 @@ class TriangularResamplingFD2(PackedReplayForward, DiffForcingWanModel):
                 old_target,a,b=targets[index][k]
                 targets[index][k]=(gt[:,start:end]-residual,a,b)
             all_xt[index]=torch.cat(parts,dim=1)
+            if v_tgt_parts:
+                self._rollout_v_targets[index]=torch.cat(v_tgt_parts,dim=1)
 
     @torch.no_grad()
     def replay_batch(self, requests):
@@ -103,8 +132,12 @@ class TriangularResamplingFD2(PackedReplayForward, DiffForcingWanModel):
         each is exactly the same one-step Euler branch as serial replay, and
         no snapshot changes the canonical trajectory or commits future states.
         """
+        need_full_clean=(self.target_mode=='pure_dmd')
         states={i:r['noise'].clone() for i,r in requests.items()}
-        values={i:[float(t) for t in r['times']] for i,r in requests.items()}
+        values={
+            i:[float(t) for t in r['times']]+([float(self.time_scheduler.get_t_max(r['gt'].size(1)))] if need_full_clean else [])
+            for i,r in requests.items()
+        }
         snapshots={i:[] for i in requests}
         step=0
         dt=1/self.time_scheduler.steps
@@ -145,9 +178,10 @@ class TriangularResamplingFD2(PackedReplayForward, DiffForcingWanModel):
                 def advance(t1):
                     out=states[i].clone()
                     out[:,a:b]+=velocity*(t1-t0)
-                    alpha=(t1-torch.arange(lengths[j],device=device)/self.time_scheduler.chunk_size).clamp(0,1)
-                    teacher=r['gt'][:,a:b]*alpha[a:b][None,:,None,None]+r['noise'][:,a:b]*(1-alpha[a:b])[None,:,None,None]
-                    out[:,a:b]=torch.where((alpha[a:b]<r['threshold'])[None,:,None,None],teacher,out[:,a:b])
+                    if r['threshold'] > 0:
+                        alpha=(t1-torch.arange(lengths[j],device=device)/self.time_scheduler.chunk_size).clamp(0,1)
+                        teacher=r['gt'][:,a:b]*alpha[a:b][None,:,None,None]+r['noise'][:,a:b]*(1-alpha[a:b])[None,:,None,None]
+                        out[:,a:b]=torch.where((alpha[a:b]<r['threshold'])[None,:,None,None],teacher,out[:,a:b])
                     return out
                 while len(snapshots[i])<len(values[i]) and values[i][len(snapshots[i])] < (step+1)*dt-1e-8:
                     endpoint=values[i][len(snapshots[i])]
@@ -158,12 +192,13 @@ class TriangularResamplingFD2(PackedReplayForward, DiffForcingWanModel):
                 raise AssertionError('Replay batch failed to terminate')
         result={}
         for i,r in requests.items():
+            full_clean=snapshots[i].pop() if need_full_clean else snapshots[i][-1]
             final=snapshots[i][-1]
             for snap,t in zip(snapshots[i],r['times']):
                 _,_,starts,_=self.time_scheduler.get_windows([r['gt'].size(1)],[t],training=True)
                 if not torch.equal(snap[:,:starts[0]],final[:,:starts[0]]):
                     raise AssertionError('A committed frame changed in batched replay')
-            result[i]=dict(final=final,snapshots=snapshots[i],threshold=r['threshold'])
+            result[i]=dict(final=final,full_clean=full_clean,snapshots=snapshots[i],threshold=r['threshold'])
         self.replay_audit=dict(canonical_steps=step,thresholds={i:r['threshold'] for i,r in requests.items()},samples=len(requests))
         return result
 
@@ -255,3 +290,163 @@ class TriangularResamplingFD2(PackedReplayForward, DiffForcingWanModel):
         teacher = gt[:,a:b]*alpha[a:b][None,:,None,None]+noise[:,a:b]*(1-alpha[a:b])[None,:,None,None]
         out[:,a:b] = torch.where((alpha[a:b]<threshold)[None,:,None,None],teacher,out[:,a:b])
         return out
+
+    def _ensure_dmd_bundle(self, device):
+        bundle = getattr(self, '_dmd_bundle', None)
+        if bundle is not None:
+            return bundle
+        real_m = copy.deepcopy(self.model).to(device).eval()
+        real_m.requires_grad_(False)
+        fake_m = copy.deepcopy(self.model).to(device).train()
+        fake_m.requires_grad_(True)
+        opt_fake = torch.optim.AdamW(
+            fake_m.parameters(),
+            lr=self.dmd_lr,
+            betas=(0.0, 0.999),
+            weight_decay=0.0,
+        )
+        enc_null = None
+        if self.dmd_cfg_scale != 1.0:
+            with torch.no_grad():
+                enc_null = self.text_module.encode([''], device)[0].to(
+                    device=device, dtype=self.param_dtype
+                )
+        bundle = dict(
+            real_model=real_m,
+            fake_model=fake_m,
+            opt_fake=opt_fake,
+            encoded_null=enc_null,
+            step=0,
+        )
+        object.__setattr__(self, '_dmd_bundle', bundle)
+        return bundle
+
+    def compute_dmd_loss_and_step_critic(
+        self,
+        all_xt,
+        all_t_raw,
+        context,
+        seq_len_for_model,
+        final_attn_mask,
+        text_k_rope_ids,
+        text_q_rope_ids,
+        all_cross_attn_mask,
+        text_seq_len,
+        all_rope,
+        all_clean_lens,
+        predicted_result,
+    ):
+        device = all_xt[0].device
+        batch_size = len(all_xt)
+        bundle = self._ensure_dmd_bundle(device)
+        real_m = bundle['real_model']
+        fake_m = bundle['fake_model']
+        opt_fake = bundle['opt_fake']
+        cur_step = int(bundle.get('step', 0))
+        bundle['step'] = cur_step + 1
+
+        all_xt_dmd = [xt.detach() for xt in all_xt]
+        all_t_dmd = self._expand_schedule_to_patch(all_t_raw)
+        ctx_detached = [c.detach() for c in context]
+        alpha_dmd_wins = [
+            all_t_raw[i][all_clean_lens[i]:] / float(self.time_embedding_scale)
+            for i in range(batch_size)
+        ]
+
+        loss_fake_total = 0.0
+        critic_mb = max(self.dmd_critic_mb, 1)
+        n_critic = max(self.dmd_critic_steps, 1)
+        rollout_v_targets = getattr(self, '_rollout_v_targets', None)
+
+        for _ in range(n_critic):
+            opt_fake.zero_grad(set_to_none=True)
+            for mb_s in range(0, batch_size, critic_mb):
+                mb_e = min(batch_size, mb_s + critic_mb)
+                mb_idx = range(mb_s, mb_e)
+                v_fake_mb = fake_m(
+                    [all_xt_dmd[i] for i in mb_idx],
+                    [all_t_dmd[i] for i in mb_idx],
+                    [ctx_detached[i] for i in mb_idx],
+                    seq_len_for_model,
+                    attn_mask=[final_attn_mask[i] for i in mb_idx] if final_attn_mask is not None else None,
+                    text_k_rope_ids=[text_k_rope_ids[i] for i in mb_idx] if text_k_rope_ids is not None else None,
+                    text_q_rope_ids=[text_q_rope_ids[i] for i in mb_idx] if text_q_rope_ids is not None else None,
+                    cross_attn_mask=[all_cross_attn_mask[i] for i in mb_idx] if all_cross_attn_mask is not None else None,
+                    text_seq_len=text_seq_len,
+                    y=None,
+                    rope_ids=[all_rope[i] for i in mb_idx] if all_rope is not None else None,
+                )
+                loss_fake_mb = 0.0
+                for local_j, i in enumerate(mb_idx):
+                    c_len = all_clean_lens[i]
+                    v_target_fake = rollout_v_targets[i].detach().float()
+                    err_fake = v_fake_mb[local_j][:, c_len:].float() - v_target_fake
+                    if self.loss_matrix is None:
+                        se_fake = (err_fake ** 2).sum()
+                    else:
+                        se_fake = quadratic_error_sum(err_fake, self.loss_matrix.float())
+                    loss_fake_mb = loss_fake_mb + se_fake / max(err_fake.numel(), 1)
+                loss_fake_mb = loss_fake_mb / batch_size
+                loss_fake_mb.backward()
+                loss_fake_total = loss_fake_total + float(loss_fake_mb.detach()) / n_critic
+            if dist.is_available() and dist.is_initialized():
+                for p in fake_m.parameters():
+                    if p.grad is not None:
+                        dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
+            torch.nn.utils.clip_grad_norm_(fake_m.parameters(), 1.0)
+            opt_fake.step()
+            opt_fake.zero_grad(set_to_none=True)
+
+        warmup_scale = min(1.0, float(cur_step + 1) / float(max(self.dmd_warmup_steps, 1)))
+
+        with torch.no_grad():
+            v_real = real_m(
+                all_xt_dmd,
+                all_t_dmd,
+                ctx_detached,
+                seq_len_for_model,
+                attn_mask=final_attn_mask,
+                text_k_rope_ids=text_k_rope_ids,
+                text_q_rope_ids=text_q_rope_ids,
+                cross_attn_mask=all_cross_attn_mask,
+                text_seq_len=text_seq_len,
+                y=None,
+                rope_ids=all_rope,
+            )
+            v_fake_ng = fake_m(
+                all_xt_dmd,
+                all_t_dmd,
+                ctx_detached,
+                seq_len_for_model,
+                attn_mask=final_attn_mask,
+                text_k_rope_ids=text_k_rope_ids,
+                text_q_rope_ids=text_q_rope_ids,
+                cross_attn_mask=all_cross_attn_mask,
+                text_seq_len=text_seq_len,
+                y=None,
+                rope_ids=all_rope,
+            )
+
+        loss_dmd = 0.0
+        for i in range(batch_size):
+            c_len = all_clean_lens[i]
+            alpha_win = alpha_dmd_wins[i].float()
+            m_win = ((alpha_win >= self.dmd_min_alpha) & (alpha_win <= self.dmd_max_alpha)).float()[None, :, None, None]
+            v_student_win = predicted_result[i][:, c_len:].float()
+            v_real_win = v_real[i][:, c_len:].float()
+            v_fake_win = v_fake_ng[i][:, c_len:].float()
+            mask_denom = (m_win.sum() * v_student_win.size(0)).clamp(min=1.0)
+            norm_s = ((v_student_win.detach() - v_real_win).abs() * m_win).sum() / mask_denom
+            norm_f = ((v_fake_win - v_real_win).abs() * m_win).sum() / mask_denom
+            norm_factor = norm_s + norm_f + 1e-4
+            grad_v = torch.nan_to_num((v_fake_win - v_real_win) / norm_factor).clamp(-2.0, 2.0) * m_win
+            dmd_target_v = (v_student_win.detach() - grad_v).detach()
+            err_dmd = (v_student_win - dmd_target_v) * m_win
+            if self.loss_matrix is None:
+                se_dmd = (err_dmd ** 2).sum()
+            else:
+                se_dmd = quadratic_error_sum(err_dmd, self.loss_matrix.float())
+            loss_dmd = loss_dmd + 0.5 * se_dmd / mask_denom
+        loss_dmd = warmup_scale * (loss_dmd / batch_size)
+
+        return loss_dmd, torch.tensor(loss_fake_total, device=device)

@@ -82,13 +82,13 @@ data:
   target: methods.fd2.training.data.FrozenMotionDataset
   collate_fn: methods.fd2.training.data.collate_fn
   membership_manifest: ${dirs.raw_data}/manifests/humanml_babel.json   # data release (or methods/fd2/prepare_data.py)
-  membership_sha256: b27b204b48915114cd69ba016f25640e75ba809f94c496c27184cb6f63750bac   # paper's training membership
+  membership_sha256: 9025125d1b5b0893b7b66f034199fbeae83cea37bdf8f7ff94886a9620e8c216   # paper's training membership
   window_length: 200
   feature_fps: 20
   train_bs: 128
   val_bs: 32
   test_bs: 16
-  num_workers: 2
+  num_workers: 4
 model:
   target: methods.fd2.models.triangular_resampling.TriangularResamplingFD2
   ema_decay: 0.99
@@ -128,7 +128,7 @@ model:
       seed: 1234                 # dedicated TR RNG, stored in checkpoints for exact resume
       clamp_mode: frontier
     execution_config:
-      text_microbatch_size: 16   # bounds UMT5 memory; does not change the loss or batches
+      text_microbatch_size: 4    # bounds UMT5 memory; does not change the loss or batches
 fk_matrix:
   recipe: hml263_trace
 optimizer:

@@ -19,8 +19,27 @@ directory is specific to the FD2 line; shared code lives in `common/`.
 | `training/generate.py`, `training/evaluate.py` | 120 s streaming generation and the bridge to the shared long-horizon evaluator |
 | `training/native/` | copy of the upstream FD2 metrics, visualization and utility packages |
 | `upstream/FloodDiffusion2/` | the complete upstream repository at commit `9761eb1c` (reference, licenses, asset installer) |
-| `configs/humanml_babel_tr.yaml` | the paper configuration |
+| `configs/humanml_babel_tr.yaml` | the paper configuration (`FD2 + TR`, global batch 128) |
+| `configs/humanml_babel_tr_dmd.yaml` | Self-Generated Prefix + DMD configuration (`FD2 + TR + DMD`, global batch 4, lr 2e-5) |
 | `prepare_data.py`, `download_assets.py` | data membership and asset preparation |
+
+## Released Checkpoints & Official 120s Benchmark Scores
+
+Public checkpoints are hosted on Hugging Face at [**`haiyangliu0/TriangularResampling`**](https://huggingface.co/datasets/haiyangliu0/TriangularResampling):
+
+```bash
+huggingface-cli download haiyangliu0/TriangularResampling \
+    checkpoints/fd2_tr_step200.ckpt \
+    checkpoints/fd2_tr_dmd_step400.ckpt \
+    --repo-type dataset --local-dir .
+```
+
+| Model | Step | Fixed First→Last (`0-10s`→`110-120s`) | Fixed ΔFID ↓ | Fixed FID AUC ↓ | Fixed R@3 ↑ | Varying FID AUC ↓ | Varying R@3 ↑ |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **FD2 Pretrain** | `200k` | `1.69 → 5.72` | `+4.03` | `4.33` | `53.7%` | `4.31` | `36.3%` |
+| **FD2 + TR-off** | `200` | `1.60 → 5.43` | `+3.83` | `4.61` | `50.3%` | `5.74` | `35.5%` |
+| **FD2 + TR** | `200` | **`0.75 → 1.43`** | **`+0.68`** | **`1.17`** | **`70.2%`** | **`3.63`** | **`40.7%`** |
+| **FD2 + TR + DMD** | `400` | `1.69 → 3.76` | `+2.06` | `3.18` | `57.1%` | `5.56` | `35.0%` |
 
 ## How TR is implemented
 
@@ -98,8 +117,12 @@ under `deps/smplh/` (see `upstream/FloodDiffusion2/setup_project.py --smplh`); s
 ## Training
 
 ```bash
-# paper setting: 4 ranks, global batch 128
+# FD2 + TR (paper setting: 4 ranks, global batch 128)
 bash methods/fd2/scripts/run_train_ddp.sh outputs/fd2_humanml_babel_tr
+# FD2 + TR + DMD (4 ranks, global batch 4, lr 2e-5, 5-step DMD critic)
+torchrun --standalone --nproc_per_node=4 -m methods.fd2.training.train_ddp \
+    --config methods/fd2/configs/humanml_babel_tr_dmd.yaml \
+    --output outputs/fd2_humanml_babel_tr_dmd
 # resume from a full-state checkpoint (same world size and config)
 bash methods/fd2/scripts/run_train_ddp.sh outputs/fd2_humanml_babel_tr outputs/fd2_humanml_babel_tr/last.ckpt
 # single-process trainer (reduce data.train_bs to fit one GPU)
@@ -119,16 +142,21 @@ released checkpoints.
 ## Generation and evaluation
 
 ```bash
-# 120 s streaming generation for every prompt of a manifest (EMA weights, 2400 x 263 NPZ)
+# 120 s streaming generation for FD2 + TR (v0.2)
 python -m methods.fd2.training.generate --config methods/fd2/configs/humanml_babel_tr.yaml \
-    --checkpoint outputs/fd2_humanml_babel_tr/last.ckpt \
+    --checkpoint checkpoints/fd2_tr_step200.ckpt \
     --manifest common/evaluation/manifests/humanml3d_prompts_256_uniform_seed1234.jsonl \
-    --output outputs/eval/fd2_fixed/generated --method fd2_tr --seed 42
+    --output outputs/eval/fd2_tr_fixed/generated --method fd2_tr --seed 42 --batch-size 64
+# 120 s streaming generation for FD2 + TR + DMD (#12e @400)
+python -m methods.fd2.training.generate --config methods/fd2/configs/humanml_babel_tr_dmd.yaml \
+    --checkpoint checkpoints/fd2_tr_dmd_step400.ckpt \
+    --manifest common/evaluation/manifests/humanml3d_prompts_256_uniform_seed1234.jsonl \
+    --output outputs/eval/fd2_tr_dmd_fixed/generated --method fd2_tr_dmd --seed 42 --batch-size 64
 # generation + windowed metrics in one go
-bash methods/fd2/scripts/run_long_eval.sh fd2_tr outputs/fd2_humanml_babel_tr/last.ckpt \
+bash methods/fd2/scripts/run_long_eval.sh fd2_tr checkpoints/fd2_tr_step200.ckpt \
     common/evaluation/manifests/humanml3d_prompts_256_uniform_seed1234.jsonl outputs/eval/fd2_fixed \
     humanml_test outputs/eval/ref_fixed.npz
-bash methods/fd2/scripts/run_long_eval.sh fd2_tr outputs/fd2_humanml_babel_tr/last.ckpt \
+bash methods/fd2/scripts/run_long_eval.sh fd2_tr checkpoints/fd2_tr_step200.ckpt \
     common/evaluation/manifests/babel_text_streams_256.jsonl outputs/eval/fd2_varying \
     manifest_sources outputs/eval/ref_varying.npz
 ```
