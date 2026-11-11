@@ -131,14 +131,14 @@ torchrun --standalone --nproc_per_node=4 -m methods.fd2.training.train_ddp \
 
 ## Released FD2 Checkpoints & Official 120s Benchmark Scores
 
-Pre-trained post-training checkpoints for **FD2 + TR** (`step 200`) and **FD2 + TR + DMD** (`step 400`) are publicly available on Hugging Face at [**`haiyangliu0/TriangularResampling`**](https://huggingface.co/datasets/haiyangliu0/TriangularResampling):
+Pre-trained post-training checkpoints for **FD2 + TR** (`step 200`) and **FD2 + TR + DMD** (`step 400`) are publicly available on Hugging Face at [**`KunhangLI/TriangularResampling`**](https://huggingface.co/KunhangLI/TriangularResampling), next to our data release (the repository is gated: run `hf auth login` and accept its terms once):
 
 ```bash
 # Download both checkpoints into checkpoints/
-huggingface-cli download haiyangliu0/TriangularResampling \
+hf download KunhangLI/TriangularResampling \
     checkpoints/fd2_tr_step200.ckpt \
     checkpoints/fd2_tr_dmd_step400.ckpt \
-    --repo-type dataset --local-dir .
+    --local-dir .
 ```
 
 | Model | Step | Fixed First→Last (`0-10s`→`110-120s`) | Fixed ΔFID ↓ | Fixed FID AUC ↓ | Fixed R@3 ↑ | Varying FID AUC ↓ | Varying R@3 ↑ |

@@ -25,13 +25,13 @@ directory is specific to the FD2 line; shared code lives in `common/`.
 
 ## Released Checkpoints & Official 120s Benchmark Scores
 
-Public checkpoints are hosted on Hugging Face at [**`haiyangliu0/TriangularResampling`**](https://huggingface.co/datasets/haiyangliu0/TriangularResampling):
+Public checkpoints are hosted on Hugging Face at [**`KunhangLI/TriangularResampling`**](https://huggingface.co/KunhangLI/TriangularResampling), next to our data release (the repository is gated: run `hf auth login` and accept its terms once):
 
 ```bash
-huggingface-cli download haiyangliu0/TriangularResampling \
+hf download KunhangLI/TriangularResampling \
     checkpoints/fd2_tr_step200.ckpt \
     checkpoints/fd2_tr_dmd_step400.ckpt \
-    --repo-type dataset --local-dir .
+    --local-dir .
 ```
 
 | Model | Step | Fixed First→Last (`0-10s`→`110-120s`) | Fixed ΔFID ↓ | Fixed FID AUC ↓ | Fixed R@3 ↑ | Varying FID AUC ↓ | Varying R@3 ↑ |
