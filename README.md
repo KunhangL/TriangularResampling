@@ -199,8 +199,9 @@ python -m unittest discover -s tests -t . -v
 
 - [x] Our processed BABEL dataset (263D features, annotations, FD1 VAE tokens and splits)
       and the FD2 training membership, on [Hugging Face](https://huggingface.co/KunhangLI/TriangularResampling).
-- [ ] Trained checkpoints: TR and the matched TR-off baseline for FD1
-      (`humanml_babel.yaml`, 30k steps) and for FD2 (`humanml_babel_tr.yaml`, 30k steps).
+- [x] Trained checkpoints: FD2 + TR (step 200) and FD2 + TR + DMD (step 400),
+      on [Hugging Face](https://huggingface.co/KunhangLI/TriangularResampling).
+- [ ] Project page.
 
 ## Citation
 
